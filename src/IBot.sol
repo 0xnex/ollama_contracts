@@ -8,9 +8,7 @@ interface IBot is IERC721 {
         uint64 syncedPoints;
         uint64 points;
         uint8 level;
-        uint8 models;
-        uint8 verifiers;
-        uint104 abilities;
+        uint120 models;
     }
 
     function getProfile(uint256 tokenId) external view returns (Profile memory);
