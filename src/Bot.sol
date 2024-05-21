@@ -46,9 +46,9 @@ contract Bot is ERC721, Ownable, Pausable, IBot {
 
     address public fundAuthority;
 
-    string internal uri;
+    string public uri;
 
-    event SyncedPoint(uint256 indexed tokenId, uint256 syncedPoints);
+    event PointSynced(uint256 indexed tokenId, uint256 syncedPoints);
 
     event ModelPurchased(uint256 indexed tokenId, uint256 indexed modelId, uint64 points);
 
@@ -87,6 +87,8 @@ contract Bot is ERC721, Ownable, Pausable, IBot {
     error no_permission();
 
     error fund_withdraw_ether_error();
+
+    error upgrade_verification_node_before_purchase();
 
     modifier onlyHolder(uint256 tokenId) {
         address owner = ownerOf(tokenId);
@@ -147,9 +149,11 @@ contract Bot is ERC721, Ownable, Pausable, IBot {
 
         totalSupply += 1;
         _mint(to, tokenId);
+        profiles[tokenId] = Profile({syncedPoints: 0, points: 0, level: 1, models: 1});
     }
 
     function syncPoints(uint256 tokenId, uint64 points, bytes calldata signature) external {
+        ownerOf(tokenId);
         bytes32 hash = keccak256(abi.encodePacked(tokenId, points));
         if (
             !SignatureChecker.isValidSignatureNow(
@@ -167,7 +171,7 @@ contract Bot is ERC721, Ownable, Pausable, IBot {
         profile.points += SafeCast.toUint64(points - profile.syncedPoints);
         profile.syncedPoints = SafeCast.toUint64(points);
 
-        emit SyncedPoint(tokenId, points);
+        emit PointSynced(tokenId, points);
     }
 
     function getProfile(uint256 tokenId) external view returns (Profile memory) {
@@ -189,6 +193,10 @@ contract Bot is ERC721, Ownable, Pausable, IBot {
 
         Profile storage profile = profiles[tokenId];
 
+        if (profile.level % 2 == 1) {
+            revert upgrade_verification_node_before_purchase();
+        }
+
         uint8 index = modelId * 2;
 
         uint8 purchased = Bit.bit(profile.models, index);
@@ -202,6 +210,7 @@ contract Bot is ERC721, Ownable, Pausable, IBot {
         }
 
         profile.points -= ModelPrice;
+        profile.models = SafeCast.toUint120(Bit.setBit(profile.models, index));
 
         emit ModelPurchased(tokenId, modelId, ModelPrice);
     }
