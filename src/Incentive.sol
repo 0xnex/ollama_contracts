@@ -2,6 +2,9 @@
 
 pragma solidity =0.8.25;
 
+import "../lib/openzeppelin-contracts/contracts/utils/cryptography/SignatureChecker.sol";
+import "../lib/openzeppelin-contracts/contracts/utils/cryptography/MessageHashUtils.sol";
+
 interface IBot {
     function ownerOf(uint256 tokenId) external view returns (address);
     function depositOllamaToken(uint256 tokenId, uint256 amount) external;
@@ -33,6 +36,10 @@ contract Incenstive {
     uint256 public totalSupply;
     // User tokenId => staked amount
     mapping(uint256 => uint256) public balanceOf;
+
+    event Staked(address indexed holder, uint256 indexed tokenId, uint256 amount);
+
+    event Rewarded(address indexed holder, uint256 indexed tokenId, uint256 amount);
 
     constructor(IERC20 _ollamaToken, IBot _bot) {
         owner = msg.sender;
@@ -76,6 +83,8 @@ contract Incenstive {
         updateReward(holder, tokenId)
     {
         require(amount > 0, "amount = 0");
+        bytes32 hash = MessageHashUtils.toEthSignedMessageHash(keccak256(abi.encodePacked(holder, tokenId, amount)));
+        require(SignatureChecker.isValidSignatureNow(owner, hash, signature), "invalid signature");
         balanceOf[tokenId] += amount;
         totalSupply += amount;
     }
@@ -91,6 +100,7 @@ contract Incenstive {
             delete rewards[tokenId];
             delete balanceOf[tokenId];
             bot.depositOllamaToken(tokenId, reward);
+            emit Rewarded(msg.sender, tokenId, reward);
         }
     }
 
