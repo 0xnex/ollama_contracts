@@ -44,4 +44,8 @@ contract OllamaToken is Ownable, ERC20Capped, Pausable {
 
         super._update(from, to, value);
     }
+
+    function mint(address to, uint256 amount) external onlyOwner {
+        _mint(to, amount);
+    }
 }

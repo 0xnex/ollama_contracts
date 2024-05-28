@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test, console} from "../lib/forge-std/src/Test.sol";
+import {stdStorage, StdStorage} from "../lib/forge-std/src/Test.sol";
 
 import "../lib/openzeppelin-contracts/contracts/utils/cryptography/MessageHashUtils.sol";
 import "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
@@ -9,18 +10,36 @@ import "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {Bot} from "../src/Bot.sol";
 import {OllamaToken} from "../src/OllamaToken.sol";
 
+contract TestBot is Bot {
+    constructor(address _authority, address _fund, IERC20 _ollamaToken) Bot(_authority, _fund, _ollamaToken) {}
+
+    function expose_calculateLockTime(Profile memory profile) external view returns (uint32, uint32) {
+        return super._calculateLockTime(profile);
+    }
+
+    function expose_withdrawValue(Withdraw memory withdraw) external view returns (uint256) {
+        return super._withdrawValue(withdraw);
+    }
+
+    function setProfile(uint256 tokenId, Profile memory profile) external {
+        profiles[tokenId] = profile;
+    }
+}
+
 contract BotTest is Test {
-    Bot public bot;
+    using stdStorage for StdStorage;
+
+    TestBot public bot;
 
     address owner = address(0x1);
 
-    uint256 mintPk = 0x1;
+    uint256 authorityPk = 0x1;
 
-    address mintAuthority = vm.addr(mintPk);
+    address authority = vm.addr(authorityPk);
 
-    uint256 rewardPk = 0x2;
+    uint256 fundPk = 0x2;
 
-    address rewardAuthority = vm.addr(rewardPk);
+    address fund = vm.addr(fundPk);
 
     address holder0 = address(0x10);
 
@@ -28,12 +47,19 @@ contract BotTest is Test {
 
     address holder2 = address(0x12);
 
-    address public fundAuthority = address(0x4);
+    address holder3 = address(0x12);
 
-    IERC20 public ollamaToken = new OllamaToken();
+    OllamaToken public ollamaToken = new OllamaToken();
 
     function setUp() public {
-        bot = new Bot(mintAuthority, rewardAuthority, fundAuthority, ollamaToken);
+        bot = new TestBot(authority, fund, ollamaToken);
+        ollamaToken.mint(holder1, 10000e18);
+        bot.mint(holder1);
+
+        vm.startPrank(holder1);
+        ollamaToken.approve(address(bot), type(uint256).max);
+        bot.depositOllmaToken(1, 10000e18);
+        vm.stopPrank();
     }
 
     function testAdminMethods() public {
@@ -41,21 +67,16 @@ contract BotTest is Test {
         bot.setURI(uri);
         assertEq(bot.uri(), uri);
 
-        assertEq(bot.mintAuthority(), mintAuthority);
-        assertEq(bot.rewardAuthority(), rewardAuthority);
-        assertEq(bot.fundAuthority(), fundAuthority);
+        assertEq(bot.authority(), authority);
+        assertEq(bot.fund(), fund);
 
-        address newMintAuth = address(0x11);
-        bot.setMintAuthority(newMintAuth);
-        assertEq(bot.mintAuthority(), newMintAuth);
+        address newAuth = address(0x101);
+        bot.setAuthority(newAuth);
+        assertEq(bot.authority(), newAuth);
 
-        address newRewardAuthority = address(0x11);
-        bot.setRewardAuthority(newRewardAuthority);
-        assertEq(bot.rewardAuthority(), newRewardAuthority);
-
-        address newFundAuthority = address(0x11);
-        bot.setFundAuthority(newFundAuthority);
-        assertEq(bot.fundAuthority(), newFundAuthority);
+        address newFund = address(0x102);
+        bot.setFund(newFund);
+        assertEq(bot.fund(), newFund);
 
         bot.pause();
         assertEq(bot.paused(), true);
@@ -65,132 +86,187 @@ contract BotTest is Test {
     }
 
     function testMint() public {
-        bytes32 hash = keccak256(abi.encodePacked(holder1, uint256(1)));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(mintPk, MessageHashUtils.toEthSignedMessageHash(hash));
-        bytes memory signature = abi.encodePacked(r, s, v);
-        assertEq(signature.length, 65);
-        bot.mint(holder1, uint256(1), signature);
-        assertEq(bot.ownerOf(uint256(1)), holder1);
-        assertEq(bot.totalSupply(), 1);
+        vm.prank(holder0);
+        bot.mint(holder0);
 
-        bytes32 hash1 = keccak256(abi.encodePacked(holder1, uint256(2)));
-        (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(mintPk, MessageHashUtils.toEthSignedMessageHash(hash1));
-        bytes memory signature1 = abi.encodePacked(r1, s1, v1);
-        bot.mint(holder1, uint256(2), signature1);
-        assertEq(bot.ownerOf(uint256(2)), holder1);
+        assertEq(bot.balanceOf(holder0), 1);
+        assertEq(bot.ownerOf(2), holder0);
         assertEq(bot.totalSupply(), 2);
 
-        bytes32 hash2 = keccak256(abi.encodePacked(holder1, uint256(3)));
-        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(mintPk, MessageHashUtils.toEthSignedMessageHash(hash2));
-        bytes memory signature2 = abi.encodePacked(r2, s2, v2);
-        vm.expectRevert(Bot.invalid_signature.selector);
-        bot.mint(holder1, uint256(4), signature2);
+        (uint8 level, uint120 models, uint120 verifiers) = bot.profiles(1);
+        assertEq(level, 1);
+        assertEq(models, 1);
+        assertEq(verifiers, 0);
     }
 
-    function testSyncPoints() public {
-        // ok
-        bytes32 hash = keccak256(abi.encodePacked(holder1, uint256(1)));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(mintPk, MessageHashUtils.toEthSignedMessageHash(hash));
-        bytes memory signature = abi.encodePacked(r, s, v);
-        bot.mint(holder1, uint256(1), signature);
-
-        bytes32 hash1 = keccak256(abi.encodePacked(uint256(1), uint64(1000)));
-        (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(rewardPk, MessageHashUtils.toEthSignedMessageHash(hash1));
-        bytes memory signature1 = abi.encodePacked(r1, s1, v1);
-
-        vm.expectEmit(true, true, true, true);
-        emit Bot.PointSynced(uint256(1), uint64(1000));
-        bot.syncPoints(uint256(1), uint64(1000), signature1);
-
-        Bot.Profile memory profile = bot.getProfile(1);
-        assertEq(profile.points, 1000);
-        assertEq(profile.syncedPoints, 1000);
-
-        // synced points less than previous
-        bytes32 hash2 = keccak256(abi.encodePacked(uint256(1), uint64(800)));
-        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(rewardPk, MessageHashUtils.toEthSignedMessageHash(hash2));
-        bytes memory signature2 = abi.encodePacked(r2, s2, v2);
-        vm.expectRevert(Bot.already_synced.selector);
-        bot.syncPoints(uint256(1), uint64(800), signature2);
-
-        // invalid signature
-        vm.expectRevert(Bot.invalid_signature.selector);
-        bot.syncPoints(uint256(1), uint64(900), signature1);
-
-        // token id not exists
-        bytes32 hash3 = keccak256(abi.encodePacked(uint256(3), uint64(800)));
-        (uint8 v3, bytes32 r3, bytes32 s3) = vm.sign(rewardPk, MessageHashUtils.toEthSignedMessageHash(hash3));
-        bytes memory signature3 = abi.encodePacked(r3, s3, v3);
-        vm.expectRevert();
-        bot.syncPoints(uint256(3), uint64(800), signature3);
-    }
-
-    function testPurchaseModel() public {
+    function testUpgradeInsufficient() public {
         // mint nft
-        bytes32 hash = keccak256(abi.encodePacked(holder1, uint256(1)));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(mintPk, MessageHashUtils.toEthSignedMessageHash(hash));
-        bytes memory signature = abi.encodePacked(r, s, v);
-        bot.mint(holder1, uint256(1), signature);
-        // sync points
-        bytes32 hash1 = keccak256(abi.encodePacked(uint256(1), uint64(2000)));
-        (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(rewardPk, MessageHashUtils.toEthSignedMessageHash(hash1));
-        bytes memory signature1 = abi.encodePacked(r1, s1, v1);
-        bot.syncPoints(uint256(1), uint64(2000), signature1);
+        bot.mint(holder0);
 
-        vm.deal(holder1, 1 ether);
-        vm.prank(holder1);
-        bot.purchaseVerificationModel{value: 0.1 ether}(1, 0);
+        vm.startPrank(holder0);
 
-        // ok
-        vm.prank(holder1);
-        vm.expectEmit(true, true, true, false);
-        emit Bot.ModelPurchased(1, 1, 1024);
-        bot.purchaseModel(1, 1);
-
-        // purchase identical model
-        vm.prank(holder1);
         vm.expectRevert();
-        bot.purchaseModel(1, 1);
+        bot.upgrade(2, 0);
+        vm.stopPrank();
     }
 
-    function testPurchaseVerificationNode() public {
+    function testUpgrade() public {
         // mint nft
-        bytes32 hash = keccak256(abi.encodePacked(holder1, uint256(1)));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(mintPk, MessageHashUtils.toEthSignedMessageHash(hash));
-        bytes memory signature = abi.encodePacked(r, s, v);
-        bot.mint(holder1, uint256(1), signature);
-
-        vm.deal(holder1, 1 ether);
-
-        // price not match
-        vm.prank(holder1);
-        vm.expectRevert(Bot.insufficient_tokens.selector);
-        emit Bot.VerificationNodePurchased(1, 0, 0.1 ether);
-        bot.purchaseVerificationModel{value: 0.11 ether}(1, 0);
-
-        vm.prank(holder1);
-        vm.expectRevert(Bot.insufficient_tokens.selector);
-        emit Bot.VerificationNodePurchased(1, 0, 0.1 ether);
-        bot.purchaseVerificationModel{value: 0.8 ether}(1, 0);
+        bot.mint(holder0);
+        ollamaToken.mint(holder0, 100000e18);
 
         // ok
-        vm.prank(holder1);
-        vm.expectEmit(true, true, true, false);
-        emit Bot.VerificationNodePurchased(1, 0, 0.1 ether);
-        bot.purchaseVerificationModel{value: 0.1 ether}(1, 0);
+        vm.startPrank(holder0);
+
+        ollamaToken.approve(address(bot), type(uint256).max);
+        bot.depositOllmaToken(2, 1000e18);
+
+        vm.expectEmit(true, true, true, true, address(bot));
+        emit Bot.ModelUpgraded(holder0, 2, 0, bot.VerifierPrice());
+        bot.upgrade(2, 0);
+
+        (uint8 level, uint120 models, uint120 verifiers) = bot.profiles(2);
+        assertEq(level, 2);
+        assertEq(models, 1);
+        assertEq(verifiers, 1);
+        assertEq(bot.balances(2), (1000 - 768) * 10 ** 18);
+        assertEq(ollamaToken.balanceOf(fund), 768 * 10 ** 18);
+        vm.stopPrank();
 
         // upgrade identical model
-        vm.prank(holder1);
-        vm.expectRevert(Bot.already_purchased.selector);
-        emit Bot.VerificationNodePurchased(1, 0, 0.1 ether);
-        bot.purchaseVerificationModel{value: 0.1 ether}(1, 0);
+        vm.startPrank(holder1);
 
-        // upgrade no-purchased model
-        vm.prank(holder1);
-        vm.expectRevert(Bot.not_purchased.selector);
-        emit Bot.VerificationNodePurchased(1, 1, 0.1 ether);
-        bot.purchaseVerificationModel{value: 0.1 ether}(1, 1);
+        vm.expectRevert();
+        bot.upgrade(2, 0);
+        vm.stopPrank();
+
+        // upgrade not purchased model
+        vm.startPrank(holder1);
+        vm.expectRevert();
+        bot.upgrade(2, 1);
+        vm.stopPrank();
     }
 
-    function testDepositOllamaToken() public {}
+    function testPurchase() public {
+        // mint nft
+        bot.mint(holder0);
+        ollamaToken.mint(holder0, 100000e18);
+
+        // ok
+        vm.startPrank(holder0);
+        ollamaToken.approve(address(bot), type(uint256).max);
+        bot.depositOllmaToken(2, 2000e18);
+        bot.upgrade(2, 0);
+
+        vm.expectEmit(true, true, true, true);
+        emit Bot.ModelPurchased(holder0, 2, 5, bot.ModelPrice());
+        bot.purchase(2, 5);
+
+        (uint8 level, uint120 models, uint120 verifiers) = bot.profiles(2);
+        assertEq(level, 3);
+        assertEq(models, 2 ** 5 + 1);
+        assertEq(verifiers, 1);
+        assertEq(bot.balances(2), (2000 - 1024) * 10 ** 18);
+        assertEq(ollamaToken.balanceOf(fund), 1024 * 10 ** 18);
+
+        vm.stopPrank();
+
+        // purchase identical model
+        vm.startPrank(holder0);
+        vm.expectRevert();
+        bot.purchase(2, 5);
+        vm.stopPrank();
+
+        // purchase a new model before upgrade mode
+        vm.startPrank(holder0);
+        ollamaToken.approve(address(bot), type(uint256).max);
+        bot.depositOllmaToken(2, 2000e18);
+        vm.expectRevert();
+        bot.purchase(2, 5);
+        vm.stopPrank();
+    }
+
+    function testDepositOllamaToken() public {
+        // token id not exists
+        vm.startPrank(holder1);
+        vm.expectRevert();
+        bot.depositOllmaToken(3, 1000);
+        vm.stopPrank();
+    }
+
+    function testWithdraw() public {
+        // can not create withdraw request
+        vm.startPrank(holder1);
+        vm.expectRevert();
+        bot.createWithdrawRequest(1, 10_000);
+        vm.stopPrank();
+    }
+
+    function testCalculateLockTime() public {
+        // ok
+        uint256 cur = block.timestamp;
+
+        // level 4
+        Bot.Profile memory p1 = Bot.Profile({level: 4, models: 1, verifiers: 0});
+        (uint32 r1b, uint32 r1e) = bot.expose_calculateLockTime(p1);
+        assertEq(r1b, cur + 90 days);
+        assertEq(r1e, cur + 180 days);
+
+        // level 10
+        Bot.Profile memory p2 = Bot.Profile({level: 10, models: 1, verifiers: 0});
+        (uint32 r2b, uint32 r2e) = bot.expose_calculateLockTime(p2);
+        assertEq(r2b, cur + 60 days);
+        assertEq(r2e, cur + 120 days);
+
+        // level 18
+        Bot.Profile memory p3 = Bot.Profile({level: 18, models: 1, verifiers: 0});
+        (uint32 r3b, uint32 r3e) = bot.expose_calculateLockTime(p3);
+        assertEq(r3b, cur + 30 days);
+        assertEq(r3e, cur + 60 days);
+
+        // do not reach user lever for withdrawal
+        Bot.Profile memory p0 = Bot.Profile({level: 1, models: 1, verifiers: 0});
+        vm.expectRevert();
+        bot.expose_calculateLockTime(p0);
+    }
+
+    function testWithdrawValue() public {
+        Bot.Withdraw memory withdrawal = Bot.Withdraw({releaseTime0: 1000, releaseTime1: 2000, amount: 5000});
+
+        // > releaseTime0 && < releaseTime1
+        skip(1200); // block.timestamp starts from 1, cur = 1201
+        console.log(block.timestamp);
+        uint256 amount0 = bot.expose_withdrawValue(withdrawal);
+        assertEq(amount0, 5000 * 201 / 1000);
+
+        // after releaseTime1
+        skip(800); // cur = 2001
+        uint256 amount1 = bot.expose_withdrawValue(withdrawal);
+        assertEq(amount1, 5000);
+
+        // before releaseTime0
+        rewind(1200); // cur = 801
+        vm.expectRevert();
+        bot.expose_withdrawValue(withdrawal);
+
+        // amount is 0
+        skip(1000); // cur = 1801
+        withdrawal.amount = 0;
+        vm.expectRevert();
+        bot.expose_withdrawValue(withdrawal);
+    }
+
+    function testCreateWithdrawRequest() public {
+        bot.setProfile(1, Bot.Profile({level: 8, models: 1, verifiers: 0}));
+
+        vm.startPrank(holder1);
+        vm.expectEmit(true, true, true, true);
+        emit Bot.WithdrawCreated(holder1, 1, 5000, 1 + 90 days, 1 + 180 days);
+        bot.createWithdrawRequest(1, 5000);
+        (uint32 w0s, uint32 w0e, uint192 amount) = bot.withdrawals(1);
+        assertEq(1 + 90 days, w0s);
+        assertEq(1 + 180 days, w0e);
+        assertEq(5000, amount);
+        vm.stopPrank();
+    }
 }

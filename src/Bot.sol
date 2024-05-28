@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity =0.8.25;
 
-import "../lib/openzeppelin-contracts/contracts/token/ERC721/ERC721.sol";
+import "../lib/openzeppelin-contracts/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import "../lib/openzeppelin-contracts/contracts/utils/cryptography/SignatureChecker.sol";
 import "../lib/openzeppelin-contracts/contracts/utils/cryptography/MessageHashUtils.sol";
@@ -13,64 +13,68 @@ import "../lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol"
 import "./IBot.sol";
 import {Bit} from "./Bit.sol";
 
-contract Bot is ERC721, Ownable, Pausable, IBot {
+contract Bot is ERC721Enumerable, Ownable, Pausable {
+    // price of model
+    uint256 public constant ModelPrice = 256e18;
+
+    // price of verification node
+    uint256 public constant VerifierPrice = 768e18;
+
+    // max model Id
+    uint8 public constant MaxModelId = 120;
+
+    // ollam token
     IERC20 public immutable ollamaToken;
 
-    uint8 public constant MaxModelId = 59;
-
+    // Withdraw struct to represent a withdrawal request
     struct Withdraw {
-        uint32 releaseTime0;
-        uint32 releaseTime1;
-        uint192 amount;
+        uint32 releaseTime0; // The time after which the user can start withdrawing a portion of the amount
+        uint32 releaseTime1; // The time after which the user can withdraw the entire amount
+        uint192 amount; // The total amount available for withdrawal
     }
 
-    uint64 public ModelPrice = 1024;
+    // Mapping to store the withdrawal requests of each bot
+    mapping(uint256 => Withdraw) public withdrawals;
 
-    uint256 public VerificationNodePrice = 0.1 ether;
+    // Profile struct to represent a user's profile
+    struct Profile {
+        uint8 level; // The user's level
+        uint120 models; // Bitmask representing purchased models (supports up to 120 models)
+        uint120 verifiers; // Bitmask representing purchased verifiers (supports up to 120 models)
+    }
 
-    mapping(uint256 => Profile) profiles;
+    // Mapping to store profiles based on a tokenID
+    mapping(uint256 => Profile) public profiles;
 
-    mapping(uint256 => uint256) balances;
+    // Balance of ollama token per tokenID
+    mapping(uint256 => uint256) public balances;
 
-    mapping(uint256 => Withdraw) withdraws;
+    // address to receive funds
+    address public fund;
 
-    uint256 public totalSupply;
+    // address to maintain profile per token
+    address public authority;
 
-    uint128 public fundEther;
-
-    uint128 public fundOllamaToken;
-
-    address public mintAuthority;
-
-    address public rewardAuthority;
-
-    address public fundAuthority;
-
+    // base uri
     string public uri;
 
-    event PointSynced(uint256 indexed tokenId, uint256 syncedPoints);
+    event ModelPurchased(address indexed owner, uint256 indexed tokenId, uint256 indexed modelId, uint256 amount);
 
-    event ModelPurchased(uint256 indexed tokenId, uint256 indexed modelId, uint64 points);
+    event ModelUpgraded(address indexed owner, uint256 indexed tokenId, uint256 indexed modelId, uint256 amount);
 
-    event VerificationNodePurchased(uint256 indexed tokenId, uint256 indexed modelId, uint256 tokenAmount);
+    event WithdrawCreated(
+        address indexed owner, uint256 indexed tokenId, uint256 amount, uint256 releaseTime0, uint256 releaseTime1
+    );
 
-    event WithdrawCreated(uint256 indexed tokenId, uint256 amount, uint256 releaseTime0, uint256 releaseTime1);
+    event WithdrawCanceled(address indexed owner, uint256 indexed tokenId);
 
-    event WithdrawCanceled(uint256 indexed tokenId);
-
-    event Withdrawed(uint256 indexed tokenId, address indexed recipient, uint256 amount);
+    event Withdrawed(address indexed owner, uint256 indexed tokenId, address indexed recipient, uint256 amount);
 
     error invalid_signature();
 
-    error zero_address();
-
-    error already_synced();
-
     error not_holder();
 
-    error insufficient_points();
-
-    error insufficient_tokens();
+    error insufficient();
 
     error invalid_model_id();
 
@@ -78,36 +82,31 @@ contract Bot is ERC721, Ownable, Pausable, IBot {
 
     error not_purchased();
 
-    error not_verification_node();
-
     error invalid_withdraw();
 
-    error level_low_withdraw();
+    error withraw_not_allow();
 
-    error no_permission();
-
-    error fund_withdraw_ether_error();
-
-    error upgrade_verification_node_before_purchase();
-
-    modifier onlyHolder(uint256 tokenId) {
-        address owner = ownerOf(tokenId);
-        if (owner != msg.sender) {
+    modifier onlyHolder(address owner, uint256 tokenId) {
+        if (ownerOf(tokenId) != owner) {
             revert not_holder();
         }
         _;
     }
 
-    constructor(address _mintAuthority, address _rewardAuthority, address _fundAuthority, IERC20 _ollamaToken)
+    constructor(address _authority, address _fund, IERC20 _ollamaToken)
         ERC721("OLLAMABOT", "OLLAMABOT")
         Ownable(msg.sender)
     {
-        mintAuthority = _mintAuthority;
-        rewardAuthority = _rewardAuthority;
-        fundAuthority = _fundAuthority;
+        authority = _authority;
+        fund = _fund;
         ollamaToken = _ollamaToken;
     }
 
+    /**
+     * =============================================================================
+     * Admin
+     * =============================================================================
+     */
     function setURI(string calldata _uri) external onlyOwner {
         uri = _uri;
     }
@@ -116,16 +115,12 @@ contract Bot is ERC721, Ownable, Pausable, IBot {
         return uri;
     }
 
-    function setMintAuthority(address _authority) external onlyOwner {
-        mintAuthority = _authority;
+    function setAuthority(address _authority) external onlyOwner {
+        authority = _authority;
     }
 
-    function setRewardAuthority(address _authority) external onlyOwner {
-        rewardAuthority = _authority;
-    }
-
-    function setFundAuthority(address _authority) external onlyOwner {
-        fundAuthority = _authority;
+    function setFund(address _fund) external onlyOwner {
+        fund = _fund;
     }
 
     function pause() external onlyOwner {
@@ -136,57 +131,18 @@ contract Bot is ERC721, Ownable, Pausable, IBot {
         _unpause();
     }
 
-    function mint(address to, uint256 tokenId, bytes calldata signature) external {
-        bytes32 hash = keccak256(abi.encodePacked(to, tokenId));
-
-        if (
-            !SignatureChecker.isValidSignatureNow(
-                mintAuthority, MessageHashUtils.toEthSignedMessageHash(hash), signature
-            )
-        ) {
-            revert invalid_signature();
-        }
-
-        totalSupply += 1;
-        _mint(to, tokenId);
-        profiles[tokenId] = Profile({syncedPoints: 0, points: 0, level: 1, models: 1});
+    /**
+     * =============================================================================
+     * Logic
+     * =============================================================================
+     */
+    function mint(address to) external {
+        uint256 id = totalSupply() + 1;
+        _mint(to, id);
+        profiles[id] = Profile({level: 1, models: 1, verifiers: 0});
     }
 
-    function syncPoints(uint256 tokenId, uint64 points, bytes calldata signature) external {
-        ownerOf(tokenId);
-        bytes32 hash = keccak256(abi.encodePacked(tokenId, points));
-        if (
-            !SignatureChecker.isValidSignatureNow(
-                rewardAuthority, MessageHashUtils.toEthSignedMessageHash(hash), signature
-            )
-        ) {
-            revert invalid_signature();
-        }
-
-        Profile storage profile = profiles[tokenId];
-
-        if (points <= profile.syncedPoints) {
-            revert already_synced();
-        }
-        profile.points += SafeCast.toUint64(points - profile.syncedPoints);
-        profile.syncedPoints = SafeCast.toUint64(points);
-
-        emit PointSynced(tokenId, points);
-    }
-
-    function getProfile(uint256 tokenId) external view returns (Profile memory) {
-        return profiles[tokenId];
-    }
-
-    function _update(address to, uint256 tokenId, address auth) internal override whenNotPaused returns (address) {
-        return super._update(to, tokenId, auth);
-    }
-
-    function balanceOfPoint(uint256 tokenId) external view override returns (uint256) {
-        return profiles[tokenId].points;
-    }
-
-    function purchaseModel(uint256 tokenId, uint8 modelId) external onlyHolder(tokenId) {
+    function purchase(uint256 tokenId, uint8 modelId) external onlyHolder(msg.sender, tokenId) {
         if (modelId > MaxModelId) {
             revert invalid_model_id();
         }
@@ -194,120 +150,99 @@ contract Bot is ERC721, Ownable, Pausable, IBot {
         Profile storage profile = profiles[tokenId];
 
         if (profile.level % 2 == 1) {
-            revert upgrade_verification_node_before_purchase();
+            revert not_purchased();
         }
 
-        uint8 index = modelId * 2;
-
-        uint8 purchased = Bit.bit(profile.models, index);
+        uint8 purchased = Bit.bit(profile.models, modelId);
 
         if (purchased == 1) {
             revert already_purchased();
         }
 
-        if (profile.points < ModelPrice) {
-            revert insufficient_points();
-        }
-
-        profile.points -= ModelPrice;
-        profile.models = SafeCast.toUint120(Bit.setBit(profile.models, index));
-
-        emit ModelPurchased(tokenId, modelId, ModelPrice);
+        balances[tokenId] -= ModelPrice;
+        SafeERC20.safeTransfer(ollamaToken, fund, ModelPrice);
+        profile.level = profile.level + 1;
+        profile.models = SafeCast.toUint120(Bit.setBit(profile.models, modelId));
+        emit ModelPurchased(msg.sender, tokenId, modelId, ModelPrice);
     }
 
-    function purchaseVerificationModel(uint256 tokenId, uint8 modelId) external payable onlyHolder(tokenId) {
+    function upgrade(uint256 tokenId, uint8 modelId) external onlyHolder(msg.sender, tokenId) {
         if (modelId > MaxModelId) {
             revert invalid_model_id();
         }
 
         Profile storage profile = profiles[tokenId];
-
-        uint8 index = modelId * 2;
-
-        uint8 purchased = Bit.bit(profile.models, index);
+        uint8 purchased = Bit.bit(profile.models, modelId);
 
         if (purchased == 0) {
             // no purchase
             revert not_purchased();
         }
 
-        uint8 ifVerificationNode = Bit.bit(profile.models, index + 1);
+        uint8 ifVerifier = Bit.bit(profile.verifiers, modelId);
 
-        if (ifVerificationNode == 1) {
+        if (ifVerifier == 1) {
             revert already_purchased();
         }
 
-        if (msg.value != VerificationNodePrice) {
-            revert insufficient_tokens();
-        }
-
-        profile.models = SafeCast.toUint120(Bit.setBit(profile.models, index + 1));
+        balances[tokenId] -= VerifierPrice;
+        SafeERC20.safeTransfer(ollamaToken, fund, VerifierPrice);
+        profile.verifiers = SafeCast.toUint120(Bit.setBit(profile.verifiers, modelId));
         profile.level += 1;
-        emit VerificationNodePurchased(tokenId, modelId, VerificationNodePrice);
+        emit ModelUpgraded(msg.sender, tokenId, modelId, VerifierPrice);
     }
 
-    function depositOllmaToken(uint256 tokenId, uint256 amount) external onlyHolder(tokenId) {
+    function depositOllmaToken(uint256 tokenId, uint256 amount) external onlyHolder(msg.sender, tokenId) {
         SafeERC20.safeTransferFrom(ollamaToken, msg.sender, address(this), amount);
         balances[tokenId] += amount;
     }
 
-    function createWithdrawRequest(uint256 tokenId, uint256 amount) external onlyHolder(tokenId) {
-        Withdraw storage withdraw = withdraws[tokenId];
+    function createWithdrawRequest(uint256 tokenId, uint256 amount) external onlyHolder(msg.sender, tokenId) {
+        Withdraw storage withdraw = withdrawals[tokenId];
         balances[tokenId] -= amount;
         withdraw.releaseTime0 = SafeCast.toUint32(block.timestamp);
-        (uint32 releaseTime0, uint32 releaseTime1) = _calculateLockTime(tokenId);
+        (uint32 releaseTime0, uint32 releaseTime1) = _calculateLockTime(profiles[tokenId]);
         withdraw.releaseTime0 = releaseTime0;
         withdraw.releaseTime1 = releaseTime1;
         withdraw.amount += SafeCast.toUint192(amount);
 
-        emit WithdrawCreated(tokenId, amount, releaseTime0, releaseTime1);
+        emit WithdrawCreated(msg.sender, tokenId, amount, releaseTime0, releaseTime1);
     }
 
-    function cancelWithdrawRequest(uint256 tokenId) external onlyHolder(tokenId) {
-        Withdraw memory withdraw = withdraws[tokenId];
+    function cancelWithdrawRequest(uint256 tokenId) external onlyHolder(msg.sender, tokenId) {
+        Withdraw memory withdraw = withdrawals[tokenId];
 
         if (withdraw.amount == 0) {
             revert invalid_withdraw();
         }
 
-        delete withdraws[tokenId];
-        emit WithdrawCanceled(tokenId);
+        balances[tokenId] = withdraw.amount;
+        delete withdrawals[tokenId];
+        emit WithdrawCanceled(msg.sender, tokenId);
     }
 
-    function doWithdraw(uint256 tokenId, address recipient) external onlyHolder(tokenId) {
-        Withdraw storage withdraw = withdraws[tokenId];
+    function doWithdraw(uint256 tokenId, address recipient) external onlyHolder(msg.sender, tokenId) {
+        Withdraw storage withdraw = withdrawals[tokenId];
 
         uint256 value = _withdrawValue(withdraw);
 
-        delete withdraws[tokenId];
+        delete withdrawals[tokenId];
 
         SafeERC20.safeTransfer(ollamaToken, recipient, value);
-        emit Withdrawed(tokenId, recipient, value);
+        emit Withdrawed(msg.sender, tokenId, recipient, value);
     }
 
-    function withdrawFundEther(address payable recipient) external {
-        if (msg.sender != fundAuthority) {
-            revert no_permission();
-        }
-
-        (bool ok,) = recipient.call{value: fundEther}("");
-        if (!ok) {
-            revert fund_withdraw_ether_error();
-        }
-        fundEther = 0;
+    /**
+     * =============================================================================
+     * Internal
+     * =============================================================================
+     */
+    function _update(address to, uint256 tokenId, address auth) internal override whenNotPaused returns (address) {
+        return super._update(to, tokenId, auth);
     }
 
-    function withdrawFundOllamaToken(address recipient) external {
-        if (msg.sender != fundAuthority) {
-            revert no_permission();
-        }
-
-        SafeERC20.safeTransfer(ollamaToken, recipient, fundOllamaToken);
-        fundOllamaToken = 0;
-    }
-
-    function _withdrawValue(Withdraw storage withdraw) internal view returns (uint256) {
-        if (withdraw.amount == 0 || block.timestamp < withdraw.releaseTime0) {
+    function _withdrawValue(Withdraw memory withdraw) internal view returns (uint256) {
+        if (withdraw.amount == 0 || block.timestamp <= withdraw.releaseTime0) {
             revert invalid_withdraw();
         }
 
@@ -319,21 +254,20 @@ contract Bot is ERC721, Ownable, Pausable, IBot {
         return withdraw.amount;
     }
 
-    function _calculateLockTime(uint256 tokenId) internal view returns (uint32, uint32) {
-        Profile memory profile = profiles[tokenId];
+    function _calculateLockTime(Profile memory profile) internal view returns (uint32, uint32) {
         uint32 cur = SafeCast.toUint32(block.timestamp);
 
         uint256 level = profile.level;
 
-        if (level < 3) {
-            revert level_low_withdraw();
+        if (level < 4) {
+            revert withraw_not_allow();
         }
 
-        if (level < 6) {
+        if (level < 10) {
             return (cur + 90 days, cur + 180 days);
         }
 
-        if (level < 9) {
+        if (level < 18) {
             return (cur + 60 days, cur + 120 days);
         }
 
