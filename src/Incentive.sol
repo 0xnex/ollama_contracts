@@ -36,8 +36,10 @@ contract Incenstive {
     uint256 public totalSupply;
     // User tokenId => staked amount
     mapping(uint256 => uint256) public balanceOf;
+    // record used withdrawal request ids
+    mapping(bytes32=>bool) public withrawalIds;
 
-    event Staked(address indexed holder, uint256 indexed tokenId, uint256 amount);
+    event Staked(bytes32 indexed withrawalId, address indexed holder, uint256 indexed tokenId, uint256 amount);
 
     event Rewarded(address indexed holder, uint256 indexed tokenId, uint256 amount);
 
@@ -78,12 +80,14 @@ contract Incenstive {
         return rewardPerTokenStored + (rewardRate * (lastTimeRewardApplicable() - updatedAt) * 1e18) / totalSupply;
     }
 
-    function stake(address holder, uint256 tokenId, uint256 amount, bytes calldata signature)
+    function stake(address holder, uint256 tokenId, uint256 amount, uint256 expired, bytes calldata signature)
         external
         updateReward(holder, tokenId)
     {
         require(amount > 0, "amount = 0");
-        bytes32 hash = MessageHashUtils.toEthSignedMessageHash(keccak256(abi.encodePacked(holder, tokenId, amount)));
+        bytes32 hash = MessageHashUtils.toEthSignedMessageHash(keccak256(abi.encodePacked(holder, tokenId, amount, expired)));
+        require(expired > block.timestamp, "withdrawal request expired" );
+        require(!withrawalIds[hash], "used withdrawal request");
         require(SignatureChecker.isValidSignatureNow(owner, hash, signature), "invalid signature");
         balanceOf[tokenId] += amount;
         totalSupply += amount;
