@@ -37,7 +37,7 @@ contract Incenstive {
     // User tokenId => staked amount
     mapping(uint256 => uint256) public balanceOf;
     // record used withdrawal request ids
-    mapping(bytes32=>bool) public withrawalIds;
+    mapping(bytes32 => bool) public withrawalIds;
 
     event Staked(bytes32 indexed withrawalId, address indexed holder, uint256 indexed tokenId, uint256 amount);
 
@@ -85,12 +85,14 @@ contract Incenstive {
         updateReward(holder, tokenId)
     {
         require(amount > 0, "amount = 0");
-        bytes32 hash = MessageHashUtils.toEthSignedMessageHash(keccak256(abi.encodePacked(holder, tokenId, amount, expired)));
-        require(expired > block.timestamp, "withdrawal request expired" );
+        bytes32 hash =
+            MessageHashUtils.toEthSignedMessageHash(keccak256(abi.encodePacked(holder, tokenId, amount, expired)));
+        require(expired > block.timestamp, "withdrawal request expired");
         require(!withrawalIds[hash], "used withdrawal request");
         require(SignatureChecker.isValidSignatureNow(owner, hash, signature), "invalid signature");
         balanceOf[tokenId] += amount;
         totalSupply += amount;
+        emit Staked(hash, holder, tokenId, amount);
     }
 
     function earned(uint256 tokenId) public view returns (uint256) {
@@ -98,6 +100,7 @@ contract Incenstive {
     }
 
     function getReward(uint256 tokenId) external updateReward(msg.sender, tokenId) {
+        require(bot.ownerOf(tokenId) == msg.sender, "not owner");
         uint256 reward = rewards[tokenId];
 
         if (reward > 0) {
